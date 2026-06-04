@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Text Summarization System</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Long Document Summarization System</h1>
+            <p class="subtitle">Extractive (TextRank) vs. Abstractive (Transformer) Methods</p>
+        </header>
+
+        <main>
+            <!-- Input Section -->
+            <section class="input-section" id="input-section">
+                <h2>Input Text</h2>
+                <div class="sample-buttons">
+                    <span class="sample-label">Load sample:</span>
+                    <button class="sample-btn" onclick="loadSample('climate')">Climate Change</button>
+                    <button class="sample-btn" onclick="loadSample('ai')">Artificial Intelligence</button>
+                    <button class="sample-btn" onclick="loadSample('space')">Space Exploration</button>
+                    <button class="sample-btn" onclick="loadSample('health')">Public Health</button>
+                </div>
+                <textarea id="input-text" placeholder="Paste your long text here (minimum 50 characters)..." rows="10"></textarea>
+                <div class="controls">
+                    <div class="control-group">
+                        <label for="ratio">Compression Ratio:</label>
+                        <input type="range" id="ratio" min="0.1" max="0.9" step="0.1" value="0.3">
+                        <span id="ratio-value">0.3</span>
+                    </div>
+                    <div class="control-group">
+                        <label for="reference-summary">Reference Summary (optional):</label>
+                        <textarea id="reference-summary" placeholder="Optional: paste a human-written reference summary for better ROUGE evaluation..." rows="3"></textarea>
+                    </div>
+                    <button id="summarize-btn" onclick="summarize()">Summarize & Compare</button>
+                    <button id="extractive-btn" onclick="summarizeExtractiveOnly()">Extractive Only</button>
+                    <button id="abstractive-btn" onclick="summarizeAbstractiveOnly()">Abstractive Only</button>
+                    <button id="compare-all-btn" onclick="compareAllModels()">⚡ Compare All Models</button>
+                </div>
+            </section>
+
+            <!-- Collapsed input toggle -->
+            <div id="input-collapsed" class="input-collapsed hidden">
+                <button class="expand-btn" onclick="expandInput()">
+                    <span class="expand-icon">✏️</span>
+                    <span>Modify Input / New Text</span>
+                </button>
+            </div>
+
+            <!-- Loading -->
+            <div id="loading" class="loading hidden">
+                <div class="spinner"></div>
+                <p>Preparing...</p>
+                <div class="progress-bar-track">
+                    <div class="progress-bar-fill"></div>
+                </div>
+            </div>
+
+            <!-- Results Section -->
+            <section id="results" class="results-section hidden">
+                <!-- Input Stats -->
+                <div class="stats-bar" id="input-stats"></div>
+
+                <!-- Summaries Side by Side -->
+                <div class="summaries-grid" id="summaries-grid">
+                    <div class="summary-card" id="extractive-card">
+                        <h3>Extractive (TextRank)</h3>
+                        <div class="summary-text" id="extractive-summary"></div>
+                        <div class="summary-meta" id="extractive-meta"></div>
+                    </div>
+                    <div class="summary-card" id="abstractive-card">
+                        <h3>Abstractive (Transformer)</h3>
+                        <div class="summary-text" id="abstractive-summary"></div>
+                        <div class="summary-meta" id="abstractive-meta"></div>
+                    </div>
+                </div>
+
+                <!-- Multi-Model Comparison Results -->
+                <div id="multi-model-section" class="multi-model-section hidden">
+                    <!-- Models List -->
+                    <div class="models-list-card">
+                        <h2>Models Used</h2>
+                        <p class="models-list-subtitle">The following models were run on your text:</p>
+                        <div id="models-list" class="models-list"></div>
+                    </div>
+
+                    <!-- Collapsible Results -->
+                    <h2 style="margin: 2rem 0 1rem;">Individual Results</h2>
+                    <div id="model-accordions" class="model-accordions"></div>
+
+                    <!-- Errors -->
+                    <div id="multi-model-errors"></div>
+
+                    <!-- Summary / Performance Overview -->
+                    <div class="performance-summary-card" id="performance-summary">
+                        <h2>📋 Performance Summary</h2>
+                        <div id="performance-content"></div>
+                    </div>
+                </div>
+
+                <!-- Metrics Comparison -->
+                <div class="metrics-section hidden" id="metrics-section">
+                    <h2>Evaluation Metrics</h2>
+
+                    <!-- ROUGE Scores -->
+                    <div class="metrics-card scroll-reveal">
+                        <h3>ROUGE Scores</h3>
+                        <div class="metrics-table" id="rouge-table"></div>
+                    </div>
+
+                    <!-- Quality Metrics -->
+                    <div class="metrics-grid">
+                        <div class="metrics-card scroll-reveal">
+                            <h3>Information Density</h3>
+                            <div id="density-metrics"></div>
+                        </div>
+                        <div class="metrics-card scroll-reveal">
+                            <h3>Coherence</h3>
+                            <div id="coherence-metrics"></div>
+                        </div>
+                        <div class="metrics-card scroll-reveal">
+                            <h3>Redundancy</h3>
+                            <div id="redundancy-metrics"></div>
+                        </div>
+                        <div class="metrics-card scroll-reveal">
+                            <h3>Coverage</h3>
+                            <div id="coverage-metrics"></div>
+                        </div>
+                    </div>
+
+                    <!-- Overall Quality -->
+                    <div class="metrics-card scroll-reveal">
+                        <h3>Overall Quality Score</h3>
+                        <div id="overall-quality"></div>
+                    </div>
+
+                    <!-- Rankings -->
+                    <div class="metrics-card scroll-reveal">
+                        <h3>Method Comparison</h3>
+                        <div id="rankings"></div>
+                    </div>
+
+                    <!-- Topic Coverage -->
+                    <div class="metrics-card scroll-reveal">
+                        <h3>Topic Coverage Analysis</h3>
+                        <div id="topic-coverage"></div>
+                    </div>
+
+                    <!-- Metric Explanations -->
+                    <div class="metrics-card explanations-card scroll-reveal">
+                        <h3>📊 Why These Scores?</h3>
+                        <p class="explanations-subtitle">Detailed reasoning behind each metric value</p>
+                        <div id="explanations"></div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script defer src="/static/app.js"></script>
+</body>
+</html>

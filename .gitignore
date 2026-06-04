@@ -1,0 +1,49 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Environment variables (API keys)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Generated files
+generate_paper.py
+research_paper.docx
+research_paper.md
+research_paper_final.docx
+*.pdf
+email_to_professor.md
+OBSERVATIONS.md
+~$*
+
+# Test files
+test_openai.py
+test_models.py
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Model cache (huge)
+*.bin
+*.safetensors
+*.h5
