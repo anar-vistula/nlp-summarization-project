@@ -4,6 +4,7 @@ Supports English (BART) and multilingual (mBART/mT5) models.
 """
 
 import re
+from pathlib import Path
 from typing import Optional
 from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
 
@@ -11,6 +12,16 @@ from backend.preprocessing import TextPreprocessor
 
 # Whitespace normalization required by mT5 XLSum
 WHITESPACE_HANDLER = lambda k: re.sub(r'\s+', ' ', re.sub(r'\n+', ' ', k.strip()))
+
+# Locally fine-tuned Turkish model (produced by fine_tuning_notebook.ipynb).
+# Unzip it to models/mt5-turkish-finetuned/ and it is picked up automatically.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+FINETUNED_TR_DIR = PROJECT_ROOT / "models" / "mt5-turkish-finetuned"
+
+
+def finetuned_turkish_available() -> bool:
+    """True if the fine-tuned Turkish model is present on disk."""
+    return (FINETUNED_TR_DIR / "config.json").is_file()
 
 
 # Models per language group
@@ -36,6 +47,12 @@ MULTILINGUAL_MODELS = {
     # Multilingual (covers Polish, Turkish, Azerbaijani, and 50+ languages)
     "multilingual": {
         "model_id": "csebuetnlp/mT5_multilingual_XLSum",
+        "prefix": "",
+        "max_input": 512,
+    },
+    # Turkish, fine-tuned locally on XLSum-Turkish (only usable if downloaded)
+    "tr-finetuned": {
+        "model_id": str(FINETUNED_TR_DIR),
         "prefix": "",
         "max_input": 512,
     },
@@ -74,6 +91,9 @@ class AbstractiveSummarizer:
         # Auto-select based on language
         if lang == "en":
             return MULTILINGUAL_MODELS["en"]
+        # Prefer the locally fine-tuned Turkish model when it is installed
+        if lang == "tr" and finetuned_turkish_available():
+            return MULTILINGUAL_MODELS["tr-finetuned"]
         if lang in MULTILINGUAL_LANGS:
             return MULTILINGUAL_MODELS["multilingual"]
         # Default to multilingual for unknown languages

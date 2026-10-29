@@ -3,10 +3,16 @@ Multi-Model Comparison Service.
 Runs the same text through ALL available models and compares results.
 """
 
+import time
 from typing import Optional, Dict, List
 from backend.preprocessing import TextPreprocessor
 from backend.summarizers.extractive import ExtractiveSummarizer
-from backend.summarizers.abstractive import AbstractiveSummarizer, MULTILINGUAL_MODELS, EN_MODELS
+from backend.summarizers.abstractive import (
+    AbstractiveSummarizer,
+    MULTILINGUAL_MODELS,
+    EN_MODELS,
+    finetuned_turkish_available,
+)
 from backend.summarizers.paid_models import PaidModelSummarizer
 from backend.evaluation.metrics import SummaryEvaluator
 
@@ -24,35 +30,62 @@ class ComparisonService:
         self.paid = PaidModelSummarizer()
         self.evaluator = SummaryEvaluator()
 
-    def get_available_models(self, lang: str = "en") -> List[dict]:
-        """Get all models available for the given language."""
-        models = [
-            {"key": "extractive", "name": "TextRank (Extractive)", "type": "extractive"},
-        ]
+    def get_available_models(self, lang: str = "en", cross_lingual: bool = False) -> List[dict]:
+        """
+        Models offered for a document in `lang`.
 
-        # HuggingFace models — only include heavy models if Colab GPU is available
+        By default only models that suit the language are returned. With
+        `cross_lingual=True` every runnable model is returned regardless of
+        what it was trained on, so an English-only BART can be pointed at a
+        Turkish document and vice versa. Those mismatched runs are the point of
+        the cross-lingual comparison, not an error, and each entry carries a
+        `language_match` label saying which regime it belongs to.
+        """
+        from backend.evaluation.model_registry import BY_KEY, language_match
+
         from backend.summarizers.paid_models import ColabGPUClient
         colab = ColabGPUClient()
         colab_models = colab.get_available_models() if colab.is_available() else []
 
-        if lang == "en":
-            models.append({"key": "distilbart", "name": "DistilBART-CNN", "type": "hf"})
-            # Only add heavy GPU models if Colab is running
-            if "led-large-book" in colab_models:
-                models.append({"key": "led-large-book", "name": "LED-Large-BookSum (GPU)", "type": "colab"})
-            if "flan-t5-large" in colab_models:
-                models.append({"key": "flan-t5-large", "name": "Flan-T5-Large (GPU)", "type": "colab"})
-        else:
-            models.append({"key": "mt5-xlsum", "name": "mT5-XLSum (Multilingual)", "type": "hf"})
-            if "turkish-mbart" in colab_models and lang == "tr":
-                models.append({"key": "turkish-mbart", "name": "mBART Turkish (GPU)", "type": "colab"})
-            models.append({"key": "mt5-xlsum", "name": "mT5-XLSum (Multilingual)", "type": "hf"})
+        candidates: List[dict] = [
+            {"key": "extractive", "name": "TextRank (Extractive)", "type": "extractive"},
+            {"key": "distilbart", "name": "DistilBART-CNN", "type": "hf"},
+            {"key": "bart-large", "name": "BART-Large-CNN", "type": "hf"},
+            {"key": "pegasus", "name": "Pegasus-CNN/DailyMail", "type": "hf"},
+            {"key": "mt5-xlsum", "name": "mT5-XLSum (Multilingual)", "type": "hf"},
+        ]
+        if finetuned_turkish_available():
+            candidates.append({
+                "key": "mt5-turkish-finetuned",
+                "name": "mT5-Turkish (Fine-tuned)",
+                "type": "hf",
+            })
 
-        # Paid models
+        # Anything the GPU server hosts. A model hosted there AND available
+        # locally is served from the GPU, which keeps the laptop cool.
+        listed = {m["key"] for m in candidates}
+        for key in colab_models:
+            entry = BY_KEY.get(key)
+            if not entry:
+                continue
+            if key in listed:
+                for model in candidates:
+                    if model["key"] == key:
+                        model["type"] = "colab"
+            else:
+                candidates.append({"key": key, "name": entry["name"], "type": "colab"})
+
         for model_key in self.paid.get_available_models():
             config = self.paid.SUPPORTED_MODELS[model_key]
-            models.append({"key": model_key, "name": config["display_name"], "type": "paid"})
+            candidates.append({"key": model_key, "name": config["display_name"], "type": "paid"})
 
+        models = []
+        for model in candidates:
+            match = language_match(model["key"], lang)
+            # Language gate, unless the caller asked for the mismatches too.
+            if not cross_lingual and match == "cross_language":
+                continue
+            models.append({**model, "language_match": match})
         return models
 
     def compare_all(
@@ -61,6 +94,7 @@ class ComparisonService:
         reference_summary: Optional[str] = None,
         ratio: float = 0.3,
         models: Optional[List[str]] = None,
+        cross_lingual: bool = False,
     ) -> Dict:
         """
         Run all (or selected) models on the same text and compare.
@@ -77,7 +111,7 @@ class ComparisonService:
         preprocessed = self.preprocessor.preprocess(text)
         lang = preprocessed["language"]
 
-        available = self.get_available_models(lang)
+        available = self.get_available_models(lang, cross_lingual=cross_lingual)
         if models:
             available = [m for m in available if m["key"] in models]
 
@@ -87,23 +121,9 @@ class ComparisonService:
         for model_info in available:
             key = model_info["key"]
             try:
-                if model_info["type"] == "extractive":
-                    result = self.extractive.summarize(text, ratio=ratio, lang=lang)
-                elif model_info["type"] == "hf":
-                    if key == "distilbart":
-                        result = self._run_hf_model("en", text, ratio, lang)
-                    elif key == "mt5-xlsum":
-                        result = self._run_hf_model("multilingual", text, ratio, lang)
-                    else:
-                        result = self.abstractive.summarize(text, ratio=ratio, lang=lang)
-                elif model_info["type"] == "colab":
-                    from backend.summarizers.paid_models import ColabGPUClient
-                    colab = ColabGPUClient()
-                    result = colab.summarize(text, model=key)
-                elif model_info["type"] == "paid":
-                    result = self.paid.summarize(text, model_name=key, lang=lang, ratio=ratio)
-                else:
-                    continue
+                started = time.perf_counter()
+                result = self.run_model(model_info, text, ratio, lang)
+                runtime = time.perf_counter() - started
 
                 results[key] = {
                     "name": model_info["name"],
@@ -112,6 +132,8 @@ class ComparisonService:
                     "method": result.get("method", model_info["name"]),
                     "warning": result.get("warning"),
                     "reliability": result.get("reliability", "unknown"),
+                    "runtime_seconds": round(runtime, 3),
+                    "language_match": model_info.get("language_match"),
                 }
             except Exception as e:
                 errors[key] = {"name": model_info["name"], "error": str(e)}
@@ -143,6 +165,36 @@ class ComparisonService:
             "models_used": len(results),
         }
 
+    def run_model(self, model_info: Dict, text: str, ratio: float, lang: str) -> Dict:
+        """
+        Run one model on one text. Single dispatch point shared by the
+        single-document comparison and the experiment runner, so both measure
+        exactly the same systems.
+        """
+        key = model_info["key"]
+        model_type = model_info["type"]
+
+        if model_type == "extractive":
+            return self.extractive.summarize(text, ratio=ratio, lang=lang)
+        if model_type == "hf":
+            return self._run_hf_model(self._resolve_hf_model_key(key, lang), text, ratio, lang)
+        if model_type == "colab":
+            from backend.summarizers.paid_models import ColabGPUClient
+
+            # Translate the compression ratio into a token budget for the GPU
+            # server, so remote models honour the same length target as local
+            # ones instead of always generating the server's default length.
+            words = len(text.split())
+            target_words = max(50, int(words * ratio))
+            max_length = min(512, max(80, int(target_words * 1.5)))
+            min_length = max(30, int(max_length * 0.4))
+            return ColabGPUClient().summarize(
+                text, model=key, max_length=max_length, min_length=min_length
+            )
+        if model_type == "paid":
+            return self.paid.summarize(text, model_name=key, lang=lang, ratio=ratio)
+        raise ValueError(f"Unknown model type: {model_type}")
+
     def _resolve_hf_model_key(self, key: str, lang: str) -> str:
         """Resolve a UI model key to a MULTILINGUAL_MODELS key."""
         mapping = {
@@ -150,8 +202,9 @@ class ComparisonService:
             "pegasus": "en-pegasus",
             "bart-large": "en-bart-large",
             "mt5-xlsum": "multilingual",
+            "mt5-turkish-finetuned": "tr-finetuned",
         }
-        return mapping.get(key, "en")
+        return mapping.get(key, "en" if lang == "en" else "multilingual")
 
     def _run_hf_model(self, model_key: str, text: str, ratio: float, lang: str) -> dict:
         """Run a specific HuggingFace model with hierarchical chunking for long texts."""

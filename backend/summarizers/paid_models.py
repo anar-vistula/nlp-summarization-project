@@ -28,12 +28,12 @@ class PaidModelSummarizer:
         },
         "claude-sonnet": {
             "provider": "anthropic",
-            "model_id": "claude-sonnet-4-20250514",
+            "model_id": "claude-sonnet-5",
             "display_name": "Claude Sonnet (Anthropic)",
         },
         "claude-haiku": {
             "provider": "anthropic",
-            "model_id": "claude-haiku-4-20250514",
+            "model_id": "claude-haiku-4-5-20251001",
             "display_name": "Claude Haiku (Anthropic)",
         },
     }
@@ -124,14 +124,17 @@ class PaidModelSummarizer:
         )
 
         if provider == "openai":
-            summary = self._call_openai(config["model_id"], system_prompt, user_prompt)
+            summary, usage = self._call_openai(config["model_id"], system_prompt, user_prompt)
         elif provider == "anthropic":
-            summary = self._call_anthropic(config["model_id"], system_prompt, user_prompt)
+            summary, usage = self._call_anthropic(config["model_id"], system_prompt, user_prompt)
         else:
             raise ValueError(f"Unknown provider: {provider}")
 
         return {
             "summary": summary,
+            # Real token counts from the provider, so cost is measured rather
+            # than estimated (see backend/evaluation/costs.py).
+            "usage": usage,
             "method": f"Paid API ({config['display_name']})",
             "model_id": config["model_id"],
             "provider": provider,
@@ -141,8 +144,8 @@ class PaidModelSummarizer:
             "warning": None,
         }
 
-    def _call_openai(self, model_id: str, system_prompt: str, user_prompt: str) -> str:
-        """Call OpenAI API."""
+    def _call_openai(self, model_id: str, system_prompt: str, user_prompt: str):
+        """Call the OpenAI API. Returns (summary, token usage)."""
         client = self._get_openai_client()
         response = client.chat.completions.create(
             model=model_id,
@@ -153,10 +156,14 @@ class PaidModelSummarizer:
             temperature=0.3,
             max_tokens=1000,
         )
-        return response.choices[0].message.content.strip()
+        usage = getattr(response, "usage", None)
+        return response.choices[0].message.content.strip(), {
+            "input_tokens": getattr(usage, "prompt_tokens", None),
+            "output_tokens": getattr(usage, "completion_tokens", None),
+        }
 
-    def _call_anthropic(self, model_id: str, system_prompt: str, user_prompt: str) -> str:
-        """Call Anthropic API."""
+    def _call_anthropic(self, model_id: str, system_prompt: str, user_prompt: str):
+        """Call the Anthropic API. Returns (summary, token usage)."""
         client = self._get_anthropic_client()
         response = client.messages.create(
             model=model_id,
@@ -166,7 +173,11 @@ class PaidModelSummarizer:
                 {"role": "user", "content": user_prompt},
             ],
         )
-        return response.content[0].text.strip()
+        usage = getattr(response, "usage", None)
+        return response.content[0].text.strip(), {
+            "input_tokens": getattr(usage, "input_tokens", None),
+            "output_tokens": getattr(usage, "output_tokens", None),
+        }
 
 
 class ColabGPUClient:
@@ -220,26 +231,51 @@ class ColabGPUClient:
     def summarize(self, text: str, model: str = "led-large-book", max_length: int = 300, min_length: int = 50) -> dict:
         """Call Colab GPU server for summarization."""
         import httpx
+
+        # Generous timeout: a long document chunked across several passes can
+        # legitimately take minutes, and the first call to a model may still be
+        # loading it from the session's disk cache.
         response = httpx.post(
             f"{self.base_url}/summarize",
             json={"text": text, "model": model, "max_length": max_length, "min_length": min_length},
-            timeout=180,
+            timeout=900,
             verify=False,
             headers=self._get_headers(),
         )
         if response.status_code != 200:
-            raise Exception(f"Colab server error ({response.status_code}): {response.text}")
-        data = response.json()
+            raise Exception(f"Colab server error ({response.status_code}): {response.text[:300]}")
+        try:
+            data = response.json()
+        except Exception:
+            # Almost always the tunnel's own HTML error page rather than the
+            # server's reply — say so plainly instead of a JSON parse error.
+            raise Exception(
+                f"Colab server returned a non-JSON response (HTTP {response.status_code}); "
+                f"the tunnel or the model load probably timed out. Body: {response.text[:200]}"
+            )
         if "error" in data:
             raise Exception(f"Colab model error: {data['error']}")
+        summary = data["summary"]
+        if "<n>" in summary:
+            # Pegasus writes "<n>" for a line break; left in, it is counted as
+            # a token by every metric.
+            import re as _re
+
+            summary = _re.sub(r"\s*<n>\s*", " ", summary).strip()
         return {
-            "summary": data["summary"],
+            "summary": summary,
             "method": f"GPU ({model})",
             "model_id": model,
-            "compression_ratio": len(data["summary"].split()) / len(text.split()) if text else 0,
-            "language": "en",
+            "compression_ratio": len(summary.split()) / len(text.split()) if text else 0,
+            # Language is whatever the caller sent; the server is language-agnostic.
+            "language": None,
             "reliability": "high",
             "warning": None,
+            # Reported by the v2 server: GPU time excluding network round-trip,
+            # plus how many chunks the hierarchical pass needed.
+            "gpu_seconds": data.get("gpu_seconds"),
+            "chunks": data.get("chunks"),
+            "passes": data.get("passes"),
         }
 
     def summarize_batch(self, text: str, max_length: int = 300, min_length: int = 50) -> dict:

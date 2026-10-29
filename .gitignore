@@ -32,8 +32,6 @@ research_paper.docx
 research_paper.md
 research_paper_final.docx
 *.pdf
-email_to_professor.md
-OBSERVATIONS.md
 ~$*
 
 # Test files
@@ -43,7 +41,17 @@ test_models.py
 # Jupyter checkpoints
 .ipynb_checkpoints/
 
+# Downloaded / fine-tuned models (huge)
+models/
+
 # Model cache (huge)
 *.bin
 *.safetensors
 *.h5
+
+# Experiment output (regenerate by running the experiment)
+experiment_results/
+
+# Corpus and experiment output (regenerable: build_corpus.py uses a fixed seed)
+corpus/
+experiments/

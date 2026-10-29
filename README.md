@@ -25,10 +25,14 @@ A multilingual text summarization system comparing extractive (TextRank) and tra
 |-------|------|---------|----------|
 | TextRank | Extractive | Local CPU | All |
 | DistilBART-CNN | Abstractive | Local CPU | English |
+| BART-Large-CNN | Abstractive | Local CPU | English |
+| Pegasus-CNN/DailyMail | Abstractive | Local CPU | English |
 | mT5-XLSum | Abstractive | Local CPU | 44 languages |
+| mT5-Turkish (fine-tuned) | Abstractive | Local CPU | Turkish (optional, see below) |
 | LED-Large-BookSum | Abstractive | Colab GPU | English (long docs) |
 | Flan-T5-Large | Abstractive | Colab GPU | English |
 | mBART-Turkish | Abstractive | Colab GPU | Turkish |
+| Qwen2.5-7B-Instruct | Abstractive | Colab GPU (4-bit) | Multilingual |
 | GPT-4o-mini / GPT-4 | Abstractive | OpenAI API | All |
 
 ## Setup
@@ -82,6 +86,17 @@ For the heavy models (LED-Large, Flan-T5, mBART-Turkish):
 
 The Colab notebook must stay open while using GPU models.
 
+The v2 notebook hosts **every** heavy model, so the local machine only runs TextRank and the
+evaluation metrics. Models are loaded on demand and evicted under a VRAM budget; T5-family
+models load in fp32 because they emit NaNs in fp16 on a T4. Pass `--prefer-colab` to
+`scripts/run_experiment.py` to route all hosted models to the GPU.
+
+### 5. (Optional) Fine-Tuned Turkish Model
+
+Run `fine_tuning_notebook.ipynb` on Colab, download the resulting zip, and unzip it into
+`models/mt5-turkish-finetuned/` in the project root. It is detected automatically on the
+next server start and used for Turkish text in place of mT5-XLSum.
+
 ## Usage
 
 - **Summarize & Compare** — Quick comparison of extractive vs abstractive
@@ -103,16 +118,58 @@ Sample texts are provided (Climate Change, AI, Space Exploration, Public Health)
 | `/models` | GET | List available models for a language |
 | `/colab/status` | GET | Check if Colab GPU server is reachable |
 | `/samples` | GET | List sample texts |
+| `/metrics/metadata` | GET | Every metric's definition, direction, source and caveat |
+| `/experiment/documents` | GET | Documents available for the experiment runner |
+| `/experiment/run` | POST | SSE stream: all models × all documents, then aggregate statistics |
+| `/experiment/last` | GET | Full result of the last experiment run |
+| `/experiment/last.csv` | GET | Per-document, per-model scores as CSV |
 
 ## Evaluation Metrics
 
-- **ROUGE-1/2/L** — Lexical overlap (precision, recall, F1)
-- **Information Density** — Key term retention from source
-- **Coherence** — Sentence-to-sentence flow quality
-- **Redundancy** — Internal repetition detection
-- **Coverage** — Source content representation
-- **Topic Coverage** — Key topic retention (top-20 phrases)
-- **Overall Quality** — Weighted composite score
+Two families, reported separately and never mixed.
+
+**Reference-based** (require a human reference summary; omitted without one)
+
+- **ROUGE-1/2/L/Lsum** — n-gram and LCS overlap with the reference (Lin, 2004)
+- **METEOR** — unigram alignment with stem/synonym matching (Banerjee & Lavie, 2005)
+- **BERTScore** — embedding similarity (optional, `use_bertscore=True`; Zhang et al., 2020)
+
+**Intrinsic** (computed against the source document)
+
+- **Compression Ratio** — summary length relative to the source
+- **Information Density** — retention of the source's top-50 TF-IDF terms
+- **Topic Coverage** — retention of the top-20 key phrases
+- **Source Coverage** — fraction of source sentences represented
+- **Lexical Cohesion** — adjacent-sentence similarity (proxy for coherence)
+- **Redundancy / distinct-n** — internal repetition and decoder looping
+- **Abstractiveness** — novel n-gram ratio (See et al., 2017)
+- **Extractive Coverage & Density** — how much is copied, and in how long runs (Grusky et al., 2018)
+- **Factual Consistency (proxy)** — numbers and proper nouns in the summary that do not appear in the source
+- **Readability** — Flesch Reading Ease (English) and LIX (any language)
+- **Overall Quality** — weighted composite of each family; weights are reported with the score
+
+Tokenization is Unicode-aware throughout, so Turkish is scored on its actual characters
+rather than the ASCII-stripped text the default ROUGE tokenizer produces.
+
+## Statistical Evaluation
+
+The **Experiment** tab runs every model over a set of documents and reports:
+
+- per-model means with **95% percentile bootstrap confidence intervals**
+- **paired bootstrap resampling tests** (Koehn, 2004), cross-checked with **Wilcoxon signed-rank**
+- **Holm–Bonferroni** correction across all pairwise comparisons, and Cohen's d effect sizes
+- a CSV export of the raw per-document scores (`GET /experiment/last.csv`)
+
+Languages are aggregated separately, because the available model sets differ by language.
+Below five documents per language, differences are reported descriptively and **no p-values are
+given** — a paired bootstrap over two documents returns an artefact of the resampling procedure
+rather than evidence.
+
+## Tests
+
+```bash
+./venv/bin/python -m pytest tests -q
+```
 
 ## Tech Stack
 

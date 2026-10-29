@@ -4,8 +4,9 @@ Exposes endpoints for summarization and evaluation.
 """
 
 import json
+import time
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -17,9 +18,12 @@ from backend.api.schemas import (
     ExtractiveResponse,
     AbstractiveResponse,
     HealthResponse,
+    ExperimentRequest,
 )
 from backend.service import SummarizationService
 from backend.comparison import ComparisonService
+from backend.evaluation.experiment import ExperimentRunner
+from backend.evaluation.metrics import SummaryEvaluator
 from backend.sample_texts import get_sample, get_all_samples
 
 app = FastAPI(
@@ -43,6 +47,7 @@ app.add_middleware(
 # Initialize services (lazy model loading)
 service = SummarizationService(model_name="auto", use_bertscore=False)
 comparison_service = ComparisonService()
+experiment_runner = ExperimentRunner(comparison_service, evaluator=service.evaluator)
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -136,19 +141,23 @@ async def summarize_stream(request: SummarizeRequest):
             lang = preprocessed["language"]
             yield f"data: {json.dumps({'stage': 'preprocessing', 'data': {'word_count': preprocessed['word_count'], 'sentence_count': preprocessed['num_sentences'], 'chunk_count': preprocessed['num_chunks'], 'language': lang}})}\n\n"
 
-            # Stage 2: Extractive summarization
+            # Stage 2: Extractive summarization (timed, for the efficiency comparison)
+            started = time.perf_counter()
             extractive_result = service.extractive.summarize(
                 request.text,
                 num_sentences=request.num_sentences,
                 ratio=request.ratio,
                 lang=lang,
             )
+            extractive_result["runtime_seconds"] = round(time.perf_counter() - started, 3)
             yield f"data: {json.dumps({'stage': 'extractive', 'data': extractive_result})}\n\n"
 
             # Stage 3: Abstractive summarization
+            started = time.perf_counter()
             abstractive_result = service.abstractive.summarize(
                 request.text, ratio=request.ratio, lang=lang
             )
+            abstractive_result["runtime_seconds"] = round(time.perf_counter() - started, 3)
             yield f"data: {json.dumps({'stage': 'abstractive', 'data': abstractive_result})}\n\n"
 
             # Stage 4: Metrics evaluation
@@ -179,10 +188,15 @@ async def summarize_stream(request: SummarizeRequest):
 
 
 @app.get("/models")
-async def get_available_models(lang: str = "en"):
-    """Get all available summarization models for the given language."""
-    models = comparison_service.get_available_models(lang)
-    return {"models": models, "language": lang}
+async def get_available_models(lang: str = "en", cross_lingual: bool = False):
+    """
+    Available models for a language.
+
+    With cross_lingual=true, models trained on other languages are included as
+    well, each labelled with its language_match.
+    """
+    models = comparison_service.get_available_models(lang, cross_lingual=cross_lingual)
+    return {"models": models, "language": lang, "cross_lingual": cross_lingual}
 
 
 @app.get("/colab/status")
@@ -209,10 +223,85 @@ async def compare_all_models(request: SummarizeRequest):
             text=request.text,
             reference_summary=request.reference_summary,
             ratio=request.ratio,
+            cross_lingual=request.cross_lingual,
         )
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Comparison failed: {str(e)}")
+
+
+@app.get("/metrics/metadata")
+async def metrics_metadata():
+    """
+    Description of every metric: what it measures, which direction is better,
+    its source in the literature, and its caveat. The UI renders its labels
+    and tooltips from this, so documentation cannot drift from the code.
+    """
+    return {"metrics": SummaryEvaluator.metric_metadata()}
+
+
+@app.get("/experiment/documents")
+async def experiment_documents():
+    """Documents available as experiment material."""
+    return {"documents": ExperimentRunner.list_documents()}
+
+
+@app.post("/experiment/run")
+async def experiment_run(request: ExperimentRequest):
+    """
+    Run the controlled experiment: every available model over every selected
+    document, then means with bootstrap confidence intervals and pairwise
+    significance tests.
+
+    Streams Server-Sent Events (`plan`, `result`, `error`, `aggregate`,
+    `done`) because a full run over several documents takes minutes on CPU.
+    """
+
+    def event_generator():
+        try:
+            events = experiment_runner.run(
+                document_keys=request.document_keys,
+                model_keys=request.model_keys,
+                ratio=request.ratio,
+                extra_documents=[d.model_dump() for d in (request.extra_documents or [])],
+            )
+            for event in events:
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'stage': 'error', 'data': {'message': str(e)}})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/experiment/last.csv")
+async def experiment_last_csv():
+    """Per-document, per-model scores of the last run as CSV."""
+    # Fall back to the newest run saved on disk: the dev server reloads on every
+    # code edit, which would otherwise discard a long run held in memory.
+    csv_text = experiment_runner.last_run_csv() or experiment_runner.latest_saved_csv()
+    if not csv_text:
+        raise HTTPException(status_code=404, detail="No experiment has been run yet")
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="experiment_results.csv"'},
+    )
+
+
+@app.get("/experiment/last")
+async def experiment_last():
+    """Full result of the last experiment run, including aggregates."""
+    if not experiment_runner.last_run:
+        raise HTTPException(status_code=404, detail="No experiment has been run yet")
+    return experiment_runner.last_run
 
 
 @app.get("/samples")

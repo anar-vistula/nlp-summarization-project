@@ -194,6 +194,10 @@ class ExtractiveSummarizer:
             "num_sentences_total": len(sentences),
             "compression_ratio": len(summary.split()) / preprocessed["word_count"] if preprocessed["word_count"] > 0 else 0,
             "language": lang,
+            # Sentences are copied verbatim from the source, so the output
+            # cannot contain fabricated content at sentence level.
+            "reliability": "high",
+            "warning": None,
         }
 
     def _summarize_long_document_global(self, sentences: List[str], num_sentences: int, lang: str) -> str:
